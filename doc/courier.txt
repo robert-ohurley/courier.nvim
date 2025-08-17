@@ -1,0 +1,254 @@
+*courier.txt*                                              *courier.nvim*
+
+courier.nvim — edit locally, deliver to a remote on save via SSH/SCP.
+
+==============================================================================
+INTRO                                                              *courier*
+                                                                 *courier-nvim*
+courier.nvim lets you work on files locally and, on save, push the buffer to
+a corresponding path on a remote machine. It resolves the remote path by
+finding the first common ancestor directory name and verifying the remainder
+exists on the remote. It shells out to your system `ssh` and `scp`.
+
+Requires: Neovim 0.9+, ssh, scp.
+
+==============================================================================
+INSTALL                                                     *courier-install*
+
+With lazy.nvim: >
+  { dir = "~/dev/courier.nvim",
+    config = function()
+      require("courier").setup({
+        remote = {
+          search_roots = { "/root", "~", "~/dev" },  -- parent dirs on remote
+          confirm_on_save = true,
+          scp_opts = "-p -C",
+          verbose = true,
+        }
+      })
+    end
+  }
+<
+
+Native packages: put the repo at: >
+  ~/.config/nvim/pack/plugins/start/courier.nvim
+<
+
+==============================================================================
+USAGE                                                         *courier-usage*
+
+1. Point courier at your remote host (any ssh target string): >
+   :CourierRemote root@192.168.0.235
+<
+2. Edit a local file (e.g. `/home/you/dev/app/src/index.ts`) and write it: >
+   :w
+<
+3. You’ll be prompted to replace the corresponding remote file. Choose “Yes”.
+
+Manual push (bypass prompt with bang): >
+  :CourierPush
+  :CourierPush!
+<
+
+Disable without uninstalling: >
+  :CourierRemoteOff
+<
+
+==============================================================================
+COMMANDS                                                   *courier-commands*
+
+:CourierRemote {ssh-conn}                                  *:CourierRemote*
+    Set/replace the SSH connection string (enables syncing, clears caches).
+    Examples:
+      :CourierRemote root@192.168.0.235
+      :CourierRemote "user@host -p 2222"
+      :CourierRemote my-ssh-config-host
+
+:CourierRemoteOff                                          *:CourierRemoteOff*
+    Disable remote syncing (keeps last connection string around).
+
+:CourierPush[!]                                            *:CourierPush*
+    Push current buffer immediately. With !, bypass the confirm prompt.
+
+:CourierReindex                                            *:CourierReindex*
+    Rebuild the remote directory index (use if the remote tree changed).
+
+:CourierDebugResolve                                       *:CourierDebugResolve*
+    Runs the resolver against the current buffer and prints step-by-step logs
+    to |:messages| (useful for path/debugging).
+
+(If a command is missing, ensure your `plugin/courier.lua` is loaded.)
+
+==============================================================================
+CONFIGURATION                                           *courier-configuration*
+
+Call once during startup: >
+  require("courier").setup({
+    -- top-level demo options used by :Courier (optional):
+    message = "Hello from courier.nvim!",
+    highlight_group = "Search",
+
+    remote = {
+      -- Remote parent directories (searched in this order):
+      -- For local /…/app/src/file.ts and ancestor=app, courier probes:
+      --   <root>/app/src/file.ts
+      -- Choose parents, not the ancestor itself.
+      search_roots = { "/root", "~", "~/dev" },
+
+      -- Prompt before pushing on save:
+      confirm_on_save = true,
+
+      -- scp flags (split into argv): "-p -C" to preserve times and compress:
+      scp_opts = "-p -C",
+
+      -- Info-level notifications:
+      verbose = true,
+    }
+  })
+<
+
+Notes:
+- Changing |courier-configuration| at runtime is allowed: call setup() again.
+- Changing `search_roots` clears internal caches and rebuilds the remote index.
+
+==============================================================================
+RUNTIME STATE & API                                      *courier-runtime*
+
+Courier keeps a private in-memory state (per Neovim session):
+    ssh             SSH target string (set by |:CourierRemote|).
+    enabled         true after setting an SSH target.
+    search_roots    Remote parents to scan (from setup()).
+    confirm_on_save Prompt behavior (from setup()).
+    scp_opts        SCP flags string (from setup()).
+    verbose         Info notifications (from setup()).
+    cache           Map: ancestor → resolved base dir (memoized).
+    dir_index       Remote directory index (built on first resolve).
+
+Minimal public Lua API (stable façade): >
+  local courier = require("courier")
+  courier.setup({...})                                 -- configure
+  courier.remote.set("root@host -p 2222")              -- same as :CourierRemote
+  courier.remote.disable()                             -- same as :CourierRemoteOff
+  courier.remote.push({ force = true })                -- same as :CourierPush!
+  courier.remote.enabled()                             -- boolean
+<
+
+Internals live under `courier.remote` and may change; prefer the façade above.
+
+==============================================================================
+PATH RESOLUTION                                             *courier-resolve*
+
+Given a local absolute path, courier splits it into components and scans
+left→right for a common ancestor directory name. For each candidate
+(ancestor, remainder), it attempts:
+
+    <root>/<ancestor>/<remainder>
+
+Where <root> comes from |courier-configuration| `remote.search_roots`.
+The first path that *exists on the remote* wins.
+
+Example:
+  Local:  /home/you/dev/box/app/src/index.ts
+  Roots:  [ "/root", "~", "~/dev" ]
+  Try:    /root/app/src/index.ts   (if exists, use this)
+          $HOME/app/src/index.ts
+          $HOME/dev/app/src/index.ts
+
+==============================================================================
+REMOTE INDEXING                                             *courier-indexing*
+
+To avoid fragile, repeated “probe scripts”, courier builds a small *directory
+index* on first use:
+
+- For each search root, list its immediate subdirectories and record:
+      { name → [ absolute_base_dirs... ] }
+- During resolution, look up the ancestor name in the index, then validate
+  `base/remainder` with a single `ssh 'test -e …'`.
+
+Rebuild the index any time:
+  - You change `search_roots` (automatic).
+  - You run |:CourierReindex| manually (e.g., after moving directories).
+
+==============================================================================
+AUTH & ENV                                                       *courier-auth*
+
+Courier never handles credentials itself. It calls your system `ssh`/`scp`.
+Use key-based auth and an agent for non-interactive use.
+
+Tips:
+- Explicitly set the user if writing to `/root/...`:
+    :CourierRemote root@host
+- Custom ports & jump hosts should be handled in `~/.ssh/config`, or be part
+  of the connection string you pass to |:CourierRemote|.
+
+==============================================================================
+DEBUGGING & LOGS                                           *courier-debugging*
+
+Verbose prints go to |:messages| while you test/refactor. Typical flows:
+
+- See the exact resolution steps for the current buffer: >
+    :CourierDebugResolve
+<
+- Rebuild the directory index if remote layout changed: >
+    :CourierReindex
+<
+- You can keep prints while testing; later gate them behind a debug flag.
+
+Common pitfalls:
+- Wrong root granularity (e.g., using `/root/app` as a root makes probes like
+  `/root/app/app/...`). Use the *parent* of the ancestor.
+- Different SSH user inside Neovim than your shell. Make it explicit:
+    :CourierRemote root@host
+
+==============================================================================
+TROUBLESHOOTING                                       *courier-troubleshooting*
+
+• “Couldn’t resolve remote path”
+  - The ancestor directory doesn’t exist under any `search_roots`.
+  - Fix `search_roots` (parents!), or create the directory on the remote.
+  - Reindex: |:CourierReindex|.
+
+• SCP fails with: dest open ""/path"": No such file or directory
+  - Caused by quoting the destination when building argv.
+  - Fixed in current version: dest should be `user@host:/abs/path` without
+    extra quotes.
+
+• Remote “then unexpected” / noisy shells
+  - Use `sh -c` (not a login shell), avoid `set -e`.
+  - We quote scripts with single-quote wrapping to preserve newlines.
+
+• Nothing happens on save
+  - Ensure plugin file loaded (see |:scriptnames| for `plugin/courier.lua`).
+  - Check autocmd: `:au CourierAuto`.
+  - Buffer must be a named file (|expand()| `%:p` non-empty).
+
+==============================================================================
+FAQ                                                             *courier-faq*
+
+Q: Can I have different remotes per buffer?
+A: Not yet. Current state is global. It’s feasible to extend `state` to be
+   buffer-keyed if you need it.
+
+Q: Does it support Windows paths?
+A: Current implementation assumes POSIX-like local paths. PRs welcome.
+
+Q: Can I use rsync?
+A: Not built-in; SCP is used for single-file pushes. An rsync mode could be
+   added as a configurable transfer backend.
+
+==============================================================================
+CREDITS                                                        *courier-credits*
+
+Author: You ♥
+Issues / ideas: open a PR or file an issue in the repository.
+
+==============================================================================
+INDEX                                                           *courier-index*
+
+Topics: |courier| |courier-install| |courier-usage| |courier-commands|
+        |courier-configuration| |courier-runtime| |courier-resolve|
+        |courier-indexing| |courier-auth| |courier-debugging|
+        |courier-troubleshooting| |courier-faq|
+
+------------------------------------------------------------------------------
+vim:tw=78:ts=8:ft=help:norl:
