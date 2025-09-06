@@ -66,31 +66,50 @@ end
 -- Output format from remote: NUL-separated records of "name<TAB>abs".
 local function build_remote_dir_index()
   print("[courier] building remote dir index…")
+  print("[courier] search_roots = " .. vim.inspect(state.search_roots))
 
   local parts = { "set -u" }
   for _, root in ipairs(state.search_roots) do
     local R = expand_home(root)
     table.insert(parts, ([[
-      R=%s
-      if [ -d "$R" ]; then
-        # list immediate subdirs; handle names with spaces; avoid glob error when none
-        for d in "$R"/*/; do
-          [ -d "$d" ] || continue
-          b=$(basename "$d")
-          # Print: name<TAB>abs<NUL>
-          printf "%%s\t%%s\0" "$b" "${d%%/}"
-        done
-      fi
-    ]]):format(R))
+R=%s
+if [ -d "$R" ]; then
+  # List immediate subdirs. Use a POSIX-safe guard to detect no-match.
+  set -- "$R"/*/
+  case "$1" in
+    *'*'*) set -- ;;  # no subdirs → glob didn't expand; clear the list
+  esac
+
+  for d in "$@"; do
+    [ -d "$d" ] || continue
+    b=$(basename "$d")
+    # Print: name<TAB>abs<NUL>
+    printf "%%s\t%%s\0" "$b" "${d%%/}"
+  done
+fi
+]]):format(R))
   end
-  local script = table.concat(parts, " ; ")
+
+  -- Succeed even if no roots matched / no subdirs
+  table.insert(parts, "exit 0")
+
+  -- Join with newlines (avoid stray leading/trailing ';')
+  local script = table.concat(parts, "\n")
   local remote_cmd = "sh -c " .. sh_single_quote(script)
 
-
+  print("[courier] index cmd: ssh " .. tostring(state.ssh) .. " " .. remote_cmd)
   local ok, out, err = sys("ssh", { state.ssh, remote_cmd })
+  print("[courier] index exit_ok=" .. tostring(ok))
+  if (err or "") ~= "" then print("[courier] dir index stderr: " .. err) end
+  if (out or "") ~= "" then
+    local prev = out:gsub("[\r]", "")
+    if #prev > 400 then prev = prev:sub(1, 400) .. " …(trunc)" end
+    print("[courier] dir index stdout preview: " .. prev)
+  end
+
   if not ok then
-    print("[courier] dir index ssh failed: " .. (err or ""))
-    return nil
+    print("[courier] dir index ssh failed; caching EMPTY index to avoid retries")
+    return {}
   end
 
   local index = {}
@@ -102,19 +121,17 @@ local function build_remote_dir_index()
     end
   end
 
-  -- Preserve root priority: order bases by first matching search_root prefix
+  -- Preserve root priority
   if next(index) then
-    local expanded_roots = {}
-    for i, r in ipairs(state.search_roots) do expanded_roots[i] = expand_home(r) end
-    local function root_rank(p)
-      for i, R in ipairs(expanded_roots) do
-        if p:sub(1, #R) == R then return i end
-      end
+    local expanded = {}
+    for i, r in ipairs(state.search_roots) do expanded[i] = expand_home(r) end
+    local function rank(p)
+      for i, R in ipairs(expanded) do if p:sub(1, #R) == R then return i end end
       return math.huge
     end
     for _, arr in pairs(index) do
       table.sort(arr, function(a, b)
-        local ra, rb = root_rank(a), root_rank(b)
+        local ra, rb = rank(a), rank(b)
         if ra ~= rb then return ra < rb end
         return a < b
       end)
@@ -142,19 +159,27 @@ local function resolve_remote_for_indexed(ancestor, remainder)
 
   for _, base in ipairs(idx[ancestor]) do
     local full = base .. "/" .. remainder
-    -- Single quiet existence check; echo full path on success
+
+    -- 🔎 New: log the candidate being tested
+    print("  (index) probing candidate path: " .. full)
+
+    -- Build test script
     local test_script = ([[test -e %q && printf "%%s\n" %q || true]]):format(full, full)
     local cmd = "sh -c " .. sh_single_quote(test_script)
+
+    -- 🔎 New: log the actual ssh command
+    print("  (index) ssh command: ssh " .. state.ssh .. " " .. cmd)
+
     local ok, out, err = sys("ssh", { state.ssh, cmd })
     if not ok and (err or "") ~= "" then
       print("  (index) ssh failed: " .. err)
     end
     if ok and out and out:find(full, 1, true) then
-      print(string.format("  (index) ✓ exists: %s", full))
+      print("  (index) ✓ exists: " .. full)
       state.cache[ancestor] = base
       return full
     else
-      print(string.format("  (index) miss at base=%s", base))
+      print("  (index) miss at base=" .. base)
     end
   end
 
@@ -311,7 +336,6 @@ function M.disable()
 end
 
 function M.is_enabled()
-  vim.notify("[courier.nvim] Remote sync enabled")
   return state.enabled and state.ssh ~= nil and state.ssh ~= ""
 end
 
@@ -324,7 +348,7 @@ end
 -- Push current buffer file
 function M.push_current(opts)
   if not M.is_enabled() then
-    vim.notify("[courier.nvim] Remote not set. Use :CourierRemote {ssh-conn}.", vim.log.levels.WARN)
+    vim.notify("[courier.nvim] Remote not set. Use :CourierStart {ssh-conn-string}.", vim.log.levels.WARN)
     return
   end
 
