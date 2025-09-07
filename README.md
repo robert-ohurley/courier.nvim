@@ -12,8 +12,8 @@ You could already keep local and remote files in sync with tools like **rsync**.
 
 **With `courier.nvim`:**
 - 📝 The priority for me was keeping my normal workflow: open/edit/save files in Neovim.  
-- ⚡ Immediate feedback: every save triggers a targeted push of *just that file*.  
-- 🧠 Smart path resolution: it auto-detects where your file belongs on the remote, using cached directory indexes.  
+- ⚡ Every save triggers a targeted push of *just that file*.  
+- 🧠 Smart path resolution: it auto-detects where your file belongs on the remote even if repo names don't match.
 - 🛡️ Granularity: optional confirmation prompt so you don’t overwrite a file if you don't want.  
 - 🪶 Lightweight: No extra processes or external watch loops.
 
