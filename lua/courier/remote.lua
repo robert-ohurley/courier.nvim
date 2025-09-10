@@ -8,7 +8,7 @@ local state = {
   scp_opts = "-p",        -- preserve times/perm by default
   cache = {},             -- [ancestor_dirname] = remote_base_abs_path
   dir_index = nil,        -- remote directory index (built once; see build_remote_dir_index)
-  verbose = true,
+  verbose = false,
 }
 
 -- =============== helpers ===============
@@ -57,17 +57,10 @@ local function expand_home(root)
 end
 
 
-
-
-
 -- =============== remote indexing ===============
 
--- Build an index of immediate subdirectories for each search root on the remote.
--- Output format from remote: NUL-separated records of "name<TAB>abs".
+-- Builds an index of immediate subdirectories for each search root on the remote. Output as NULL separated records of "name<TAB>abs".
 local function build_remote_dir_index()
-  print("[courier] building remote dir index…")
-  print("[courier] search_roots = " .. vim.inspect(state.search_roots))
-
   local parts = { "set -u" }
   for _, root in ipairs(state.search_roots) do
     local R = expand_home(root)
@@ -97,18 +90,14 @@ fi
   local script = table.concat(parts, "\n")
   local remote_cmd = "sh -c " .. sh_single_quote(script)
 
-  print("[courier] index cmd: ssh " .. tostring(state.ssh) .. " " .. remote_cmd)
   local ok, out, err = sys("ssh", { state.ssh, remote_cmd })
-  print("[courier] index exit_ok=" .. tostring(ok))
   if (err or "") ~= "" then print("[courier] dir index stderr: " .. err) end
   if (out or "") ~= "" then
     local prev = out:gsub("[\r]", "")
     if #prev > 400 then prev = prev:sub(1, 400) .. " …(trunc)" end
-    print("[courier] dir index stdout preview: " .. prev)
   end
 
   if not ok then
-    print("[courier] dir index ssh failed; caching EMPTY index to avoid retries")
     return {}
   end
 
@@ -150,56 +139,25 @@ end
 
 -- Using the index, resolve <ancestor>/<remainder> by checking candidates in priority order.
 local function resolve_remote_for_indexed(ancestor, remainder)
-  print(string.format("resolve_remote_for(indexed): ancestor=%s remainder=%s", ancestor, remainder))
   local idx = ensure_dir_index()
   if not idx or not idx[ancestor] then
-    print("  (index) no bases for ancestor=" .. ancestor)
     return nil
   end
 
   for _, base in ipairs(idx[ancestor]) do
     local full = base .. "/" .. remainder
-
-    -- 🔎 New: log the candidate being tested
-    print("  (index) probing candidate path: " .. full)
-
-    -- Build test script
     local test_script = ([[test -e %q && printf "%%s\n" %q || true]]):format(full, full)
     local cmd = "sh -c " .. sh_single_quote(test_script)
 
-    -- 🔎 New: log the actual ssh command
-    print("  (index) ssh command: ssh " .. state.ssh .. " " .. cmd)
-
     local ok, out, err = sys("ssh", { state.ssh, cmd })
-    if not ok and (err or "") ~= "" then
-      print("  (index) ssh failed: " .. err)
-    end
     if ok and out and out:find(full, 1, true) then
-      print("  (index) ✓ exists: " .. full)
       state.cache[ancestor] = base
       return full
-    else
-      print("  (index) miss at base=" .. base)
     end
   end
 
-  print("  (index) none of bases have " .. remainder)
   return nil
 end
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 -- =============== path resolution ===============
 
@@ -207,13 +165,9 @@ end
 -- directory name on remote such that appending the remaining tail exists remotely.
 -- Search left→right to match “first common ancestor”.
 local function resolve_remote_path(local_abs)
-  print("resolve_remote_path: starting for " .. local_abs)
-
   local comps = path_components(local_abs)
-  print("  split into " .. #comps .. " components: " .. table.concat(comps, " / "))
 
   if #comps == 0 then
-    print("  no components → returning nil")
     return nil
   end
 
@@ -221,39 +175,22 @@ local function resolve_remote_path(local_abs)
     local ancestor = comps[i]
     local remainder_tbl = vim.list_slice(comps, i + 1)
     local remainder = table.concat(remainder_tbl, "/")
-    print(string.format("  try #%d: ancestor=%s remainder=%s", i, ancestor, remainder))
 
     -- Fast path: cache hit
     if state.cache[ancestor] then
       local full = state.cache[ancestor] .. "/" .. remainder
-      print("    cache hit → " .. full)
       return full
     end
 
     local candidate = resolve_remote_for_indexed(ancestor, remainder)
     if candidate then
-      print("    ✓ found → " .. candidate)
       return candidate
     else
-      print("    ✗ no match at ancestor=" .. ancestor .. ", continue")
     end
   end
 
-  print("  exhausted all components without finding a match → returning nil")
   return nil
 end
-
-
-
-
-
-
-
-
-
-
-
-
 
 -- =============== push ===============
 
@@ -271,31 +208,11 @@ local function scp_push(local_abs, remote_abs)
   table.insert(args, local_abs)
   table.insert(args, state.ssh .. ":" .. remote_abs)  -- NO extra quotes here
 
-  -- Pretty-print for logs
-  print(string.format("scp_push: scp %s %s %s",
-    table.concat(split_args(state.scp_opts or ""), " "),
-    local_abs,
-    state.ssh .. ":" .. remote_abs
-  ))
-
   local ok, _, err = sys("scp", args)
   if not ok then
-    print("  ✗ scp failed: " .. (err or "unknown error"))
   end
   return ok, err
 end
-
-
-
-
-
-
-
-
-
-
-
-
 
 -- =============== public api ===============
 
@@ -324,15 +241,15 @@ function M.set_ssh(conn_str)
   state.cache = {}
   state.dir_index = nil
   if state.enabled then
-    vim.notify("[courier.nvim] Remote set to: " .. state.ssh)
+    notify_info("[courier.nvim] Remote set to: " .. state.ssh)
   else
-    vim.notify("[courier.nvim] Remote cleared")
+    notify_info("[courier.nvim] Remote cleared")
   end
 end
 
 function M.disable()
   state.enabled = false
-  vim.notify("[courier.nvim] Remote sync disabled")
+  notify_info("[courier.nvim] Remote sync disabled")
 end
 
 function M.is_enabled()
@@ -348,24 +265,24 @@ end
 -- Push current buffer file
 function M.push_current(opts)
   if not M.is_enabled() then
-    vim.notify("[courier.nvim] Remote not set. Use :CourierStart {ssh-conn-string}.", vim.log.levels.WARN)
+    notify_info("[courier.nvim] Remote not set. Use :CourierStart {conn-string}.")
     return
   end
 
   local buf = vim.api.nvim_get_current_buf()
   local name = vim.api.nvim_buf_get_name(buf)
   if name == "" then
-    vim.notify("[courier.nvim] Buffer has no name (unsaved).", vim.log.levels.WARN)
+    notify_info("[courier.nvim] Buffer has no name (unsaved).")
     return
   end
   if not vim.loop.fs_stat(name) then
-    vim.notify("[courier.nvim] Local file not found: " .. name, vim.log.levels.WARN)
+    notify_info("[courier.nvim] Local file not found: " .. name)
     return
   end
 
   local remote_abs = resolve_remote_path(name)
   if not remote_abs then
-    vim.notify("[courier.nvim] Couldn’t resolve remote path for: " .. name, vim.log.levels.ERROR)
+    notify_info("[courier.nvim] Couldn’t resolve remote path for: " .. name)
     return
   end
 
@@ -374,7 +291,7 @@ function M.push_current(opts)
     if ok then
       notify_info(("Pushed → %s:%s"):format(state.ssh, remote_abs))
     else
-      vim.notify("[courier.nvim] scp failed (see :messages for prints)", vim.log.levels.ERROR)
+      notify_info("[courier.nvim] scp failed (see :messages for prints)")
     end
   end
 
