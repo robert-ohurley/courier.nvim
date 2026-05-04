@@ -11,9 +11,9 @@ vim.api.nvim_create_user_command("CourierStop", function()
   require("courier.remote").disable()
 end, {})
 
-vim.api.nvim_create_user_command("CourierPush", function()
-  require("courier.remote").push_current()
-end, {})
+vim.api.nvim_create_user_command("CourierPush", function(opts)
+  require("courier.remote").push_current({ force = opts.bang })
+end, { bang = true })
 
 vim.api.nvim_create_autocmd("BufWritePost", {
   group = group,
